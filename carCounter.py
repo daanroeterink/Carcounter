@@ -2,86 +2,61 @@ import cv2
 import time
 import numpy as np
 import sys
-sys.path.append("..")
-from sort.sort import *
-
-class Point:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-
-class Rectangle:
-    def __init__(self,x1,y1,x2,y2):
-        self.top = y1
-        self.bottom = y2
-        self.left = x1
-        self.right = x2
-
-
-class Line:
-    def __init__(self, startPoint: Point, endPoint: Point):
-        self.startPoint = startPoint
-        self.endPoint = endPoint
-
-
-    def calculateY(self, x):
-        lineX = [self.startPoint.x, self.endPoint.x]
-        lineY = [self.startPoint.y, self.endPoint.y]
-        return np.interp(x, lineX, lineY)
-    
+from norfair import Detection, Tracker, Video, draw_tracked_objects
+from shapely.geometry import Polygon
 
 class CarCounter:
     def __init__(self):
-        #Line to calculate inbound cars
-        self.inLineX1 = 325
-        self.inLineY1 = 500
-        self.inLineX2 = 650
-        self.inLineY2 = 525
-
-        #Line to calculate outbound cars
-        self.outLineX1 = 650
-        self.outLineY1 = 525
-        self.outLineX2 = 875
-        self.outLineY2 = 550
-
-        self.inStartPoint = Point(self.inLineX1,self.inLineY1)
-        self.inEndPoint = Point(self.inLineX2,self.inLineY2)
-
-        self.outStartPoint = Point(self.outLineX1,self.outLineY1)
-        self.outEndPoint = Point(self.outLineX2,self.outLineY2)
-
-        self.outCars = []
+        self.outboundArray = []
+        self.inboundArray = []
+        self.outboundPolygon = Polygon()
+        self.inboundPolygon = Polygon()
+        self.outDrawn = False
+        self.inDrawn = False
         self.inCars = []
-
+        self.outCars = []
         
-    def isRectangleOverlap(self, pointA: Point, pointB: Point, r: Rectangle):
-        
-        line = Line(pointA, pointB)
+    def euclidean_distance(self, detection, tracked_object):
+        return np.linalg.norm(detection.points - tracked_object.estimate)
 
-        if (r.left > line.endPoint.x or r.right < line.startPoint.x ):
-            return False
+    def convertToDetection(self, detection_yolo):
+        x, y, w, h = detection_yolo["detection"]  
+        return Detection(
+            np.array(((x+w/2, y+h/2))),
+            data={"label": detection_yolo["label"], "score": detection_yolo["score"], "realbox": [x,y,w,h]},
+        )
 
-        if (r.top < line.startPoint.y or r.bottom > line.endPoint.y ):
-            return False
+    def mouseClick(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if(len(self.outboundArray) < 4):
+                self.outboundArray.append([x,y])
+                if len(self.outboundArray) == 4:
+                    self.outboundPolygon = Polygon([
+                        (self.outboundArray[0][0],self.outboundArray[0][1]),
+                        (self.outboundArray[1][0],self.outboundArray[1][1]),
+                        (self.outboundArray[2][0],self.outboundArray[2][1]),
+                        (self.outboundArray[3][0],self.outboundArray[3][1])])
+                    self.outDrawn = True
 
-        yAtRectLeft = line.calculateY(r.left)
-        yAtRectRight = line.calculateY(r.right)
-
-        if (r.bottom > yAtRectLeft and r.bottom > yAtRectRight):
-            return False
-
-        if (r.top < yAtRectLeft and r.top < yAtRectRight):
-            return False
-
-        return True
+            else:
+                return
+        if event == cv2.EVENT_RBUTTONDOWN:
+            if(len(self.inboundArray) < 4):
+                self.inboundArray.append([x,y])
+                if len(self.inboundArray) == 4:
+                    self.inboundPolygon = Polygon([
+                        (self.inboundArray[0][0],self.inboundArray[0][1]),
+                        (self.inboundArray[1][0],self.inboundArray[1][1]),
+                        (self.inboundArray[2][0],self.inboundArray[2][1]),
+                        (self.inboundArray[3][0],self.inboundArray[3][1])])
+                    self.inDrawn = True
+            else:
+                return
+       
 
     def run(self):
         CONFIDENCE_THRESHOLD = 0.1
         NMS_THRESHOLD = 0.1
-
-        #3600 is used to calculate cars. This is the ammount of frames the sorting algorithm uses
-        carTracker = Sort(3600,5,0.4)
-        #personTracker = Sort(3600,5,0.4)
 
         class_names = [
             'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
@@ -101,6 +76,7 @@ class CarCounter:
         ]
 
         vc = cv2.VideoCapture(0)
+        #vc.set(cv2.CAP_PROP_FPS,60)
 
         net = cv2.dnn.readNet("yolov4.weights", "yolov4.cfg")
         net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
@@ -108,6 +84,14 @@ class CarCounter:
 
         model = cv2.dnn_DetectionModel(net)
         model.setInputParams(size=(416, 416), scale=1/255)
+
+        tracker = Tracker( 
+            distance_function=self.euclidean_distance,
+            distance_threshold=10
+        )
+
+        cv2.namedWindow("Frame")
+        cv2.setMouseCallback("Frame", self.mouseClick)
 
         while cv2.waitKey(1) < 1:
             (grabbed, frame) = vc.read()
@@ -119,77 +103,69 @@ class CarCounter:
             end = time.time()
 
             carScores = []
-            personScores = []
 
             for (classid, score, box) in zip(classes, scores, boxes):
-                boxScore = [box[0],box[1],box[0]+box[2],box[1]+box[3],score[0]]
-                # We are only interested in cars, but it can be used for everything offcourse
-                if (classid == 2):
-                    carScores.append(boxScore)
-                # elif (classid == 0):
-                #     personScores.append(boxScore)
+                if(classid == 2):
+                    detection = {
+                        "detection": (box[0],box[1],box[2],box[3]),
+                        "label": class_names[int(classid)],
+                        "score": score[0]
+                    }
+                    carScores.append(self.convertToDetection(detection))
 
-            if len(carScores) > 0:
-                carBoxes = carTracker.update(np.array(carScores))
-            else:
-                carBoxes = carTracker.update(np.empty((0, 5))) 
+            carDetections = tracker.update(carScores)
 
-            # if len(personScores) > 0:
-            #     personBoxes = personTracker.update(np.array(personScores))
-            # else:
-            #     personBoxes = personTracker.update(np.empty((0, 5))) 
-            
             start_drawing = time.time()
 
-            for box in carBoxes:
-                carNumber = box[4]
-                label = "car number: %f" % (carNumber)
-                x1 = int(box[2])
-                y1 = int(box[3])
-                x2 = int(box[0])
-                y2 = int(box[1])
+            if (self.outDrawn):
+                cv2.polylines(frame, [np.array(self.outboundArray, np.int32)], True, (0,0,255), 2)
+
+            if (self.inDrawn):
+                cv2.polylines(frame, [np.array(self.inboundArray, np.int32)], True, (0,255,0), 2)
+
+            for detection in carDetections:
+                box = detection.last_detection.data['realbox']
+                x1 = int(box[0])
+                y1 = int(box[1])
+                x2 = int(box[0]+box[2])
+                y2 = int(box[1]+box[3])
+                carNumber = detection.id
+                #detection.estimate[0][1] + 30
+
+                label = '{}:{} score: {:.2f}'.format(detection.last_detection.data['label'], carNumber , detection.last_detection.data['score']*100)
 
                 startPoint = (x1,y1)
                 endPoint = (x2,y2)
 
-                rect = Rectangle(x1,y1,x2,y2)
+                car = frame[y1:y2, x1:x2]
+                avg_color_per_row = np.average(car, axis=0)
+                avg_color = np.average(avg_color_per_row, axis=0)
+                carcolor = (avg_color[0], avg_color[1], avg_color[2])
+            
+                rect = Polygon([(x1,y1),(x2,y1),(x2,y2),(x1,y2)])
 
-                if (self.isRectangleOverlap(self.inStartPoint, self.inEndPoint, rect)):
+                if (rect.intersects(self.inboundPolygon)):
                     if not carNumber in self.inCars:
                         self.inCars.append(carNumber)
-                    cv2.rectangle(frame, startPoint, endPoint, (0, 0, 255), 2)
-                    cv2.putText(frame, label, (int(box[0]), int(box[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                elif (self.isRectangleOverlap(self.outStartPoint, self.outEndPoint, rect)):
+                    cv2.rectangle(frame, startPoint, endPoint, (0, 255, 0), 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                elif (rect.intersects(self.outboundPolygon)):
                     if not carNumber in self.outCars:
                         self.outCars.append(carNumber)
-                    cv2.rectangle(frame, startPoint, endPoint, (0, 255, 0), 2)
-                    cv2.putText(frame, label, (int(box[0]), int(box[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    cv2.rectangle(frame, startPoint, endPoint, (0, 0, 255), 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 else:
-                    cv2.rectangle(frame, startPoint, endPoint, (255, 0, 0), 2)
-                    cv2.putText(frame, label, (int(box[0]), int(box[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-            # for box in personBoxes:
-            #     x1 = int(box[2])
-            #     y1 = int(box[3])
-            #     x2 = int(box[0])
-            #     y2 = int(box[1])
-
-            #     startPoint = (x1,y1)
-            #     endPoint = (x2,y2)
-
-            #     label = "person number: %f" % (box[4])
-            #     cv2.rectangle(frame, startPoint, endPoint, (255, 0, 255), 2)
-            #     cv2.putText(frame, label, (int(box[0]), int(box[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+                    cv2.rectangle(frame, startPoint, endPoint, carcolor, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, carcolor, 2)
             end_drawing = time.time()
 
-            cv2.line(frame, (self.inLineX1, self.inLineY1), (self.inLineX2, self.inLineY2), (0,0,255), 3)
-            cv2.line(frame, (self.outLineX1, self.outLineY1), (self.outLineX2, self.outLineY2), (0,255,0), 3)
             outLabel = "OUT: %i" % len(self.outCars)
             inLabel = "IN: %i" % len(self.inCars)
             fps_label = "FPS: %.2f (excluding drawing time of %.2fms)" % (1 / (end - start), (end_drawing - start_drawing) * 1000)
             cv2.putText(frame, outLabel, (1700, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (150, 0, 255),3)
             cv2.putText(frame, inLabel, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (150, 150, 0), 3)
             cv2.putText(frame, fps_label, (0, 1000), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-            cv2.imshow("detections", frame)
+            cv2.imshow("Frame", frame)
         
 if __name__ == '__main__':
     counter = CarCounter()
